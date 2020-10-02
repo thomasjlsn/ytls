@@ -133,7 +133,10 @@ class YouTubeAPI(LazyLoader):
         if None in (username, channel_id, uploads_id):
             raise Exception('missing expected kwargs')
 
-        timestamp = strftime('%Y%m%d%H')  # cache uploads lasting for one hour
+        # cache uploads lasting for four hours
+        timestamp = ''.join((
+            strftime('%Y%m%d'), str(int(strftime('%H')) // 4)
+        ))
 
         uploads_cache_path = path.join(
             CACHE, f'{username}_upload_cache.{timestamp}.pkl'
