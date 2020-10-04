@@ -2,4 +2,4 @@ all:
 	:
 
 clean:
-	rm $(HOME)/.cache/youtube_api_v3/*.pkl || :
+	rm $(HOME)/.cache/youtube_api_v3/* || :

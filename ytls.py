@@ -38,12 +38,8 @@ args = argparser.parse_args()
 
 DEBUG = False or args.debug
 COLOR = (args.color or True) and not args.nocolor
-CACHE = path.join(XDG_CACHE_HOME, 'youtube_api_v3')
 HIDE = False or args.hide
 ISATTY = isatty(0)
-
-if not path.isdir(CACHE):
-    makedirs(CACHE)
 
 
 def clear_line():
@@ -74,6 +70,38 @@ def debug(string):
         stderr.write(f'\n[{colored(viewed=False, color_key="debug", string="DEBUG")}] {string}\n')
 
 
+class Cachable:
+    '''
+    Cache data on disk for faster lookups / persistent session state
+    '''
+    cache_base = path.join(XDG_CACHE_HOME, 'youtube_api_v3')
+
+    if not path.isdir(cache_base):
+        makedirs(cache_base)
+
+    def load_cache(self, cache_name, default=None):
+        cache_path = path.join(self.cache_base, cache_name)
+        cache_data = None
+
+        if path.isfile(cache_path):
+            with open(cache_path, 'rb') as cache:
+                try:
+                    cache_data = pickle.load(cache)
+                except EOFError:
+                    cache_data = None
+
+        if cache_data is None:
+            return default
+        return cache_data
+
+    def save_cache(self, cache_name, data=None):
+        cache_path = path.join(self.cache_base, cache_name)
+
+        if data is not None:
+            with open(cache_path, 'wb') as cache:
+                pickle.dump(data, cache)
+
+
 class LazyLoader:
     '''
     The Google API lib is slooooooooooow to import,
@@ -99,30 +127,19 @@ class YouTubeAPI(LazyLoader):
     max_duty_cycle = (1 / 3)
     rate_limit = ((((24 * max_duty_cycle) * 60) * 60) / 10000)
 
-    channel_cache = dict()
-    channel_cache_path = path.join(CACHE, 'channel_cache.pkl')
 
-    def get_id_of_channel(self, username):
-        if path.isfile(self.channel_cache_path):
-            with open(self.channel_cache_path, 'rb') as cache:
-                debug('loading id cache...')
-                try:
-                    self.channel_cache = pickle.load(cache)
-                except EOFError:  # corrupt / empty cache
-                    self.channel_cache = None
+class ChannelIDs(YouTubeAPI, Cachable):
+    '''
+    Get id of a channel
+    '''
+    def __init__(self):
+        self.cache_name = 'channel_ids.pkl'
 
-            try:
-                ID = self.channel_cache.get(username, None)
-                channel_id = ID[0]
-                uploads_id = ID[1]
-            except (NameError, TypeError):
-                ID = None
+    def get(self, username):
+        ids = self.load_cache(self.cache_name, default=dict())
+        channel_id = ids.get(username, None)
 
-            get_channel_id = True if ID is None else False
-        else:
-            get_channel_id = True
-
-        if get_channel_id:
+        if channel_id is None:
             query = self.lazy().channels().list(
                 part='contentDetails',
                 forUsername=username,
@@ -135,67 +152,70 @@ class YouTubeAPI(LazyLoader):
             response = query.execute()
             sleep(self.rate_limit)
 
-            items = response['items']
-            channel_id = items[-1]['id']
-            uploads_id = items[0]['contentDetails']['relatedPlaylists']['uploads']
+            channel_id = response['items'][-1]['id']
+            ids[username] = channel_id
 
-            self.channel_cache[username] = (channel_id, uploads_id)
+            self.save_cache(self.cache_name, data=ids)
 
-            with open(self.channel_cache_path, 'wb') as cache:
-                debug('cached ids')
-                pickle.dump(self.channel_cache, cache)
+        return channel_id
 
-        debug(f'{username} = {self.channel_cache[username]}')
 
-        return self.channel_cache[username]
-
-    def get_latest_uploads_from_channel(self, username=None,
-                                        channel_id=None,
-                                        uploads_id=None):
-
-        if None in (username, channel_id, uploads_id):
-            raise Exception('missing expected kwargs')
+class ChannelUploads(YouTubeAPI, Cachable):
+    '''
+    Get uploads from a channel
+    '''
+    def __init__(self, username=None, channel_id=None):
+        self.channel_id = channel_id
+        self.uploads_id = re.sub('^UC', 'UU', self.channel_id)
+        self.username = username
 
         # cache uploads lasting for four hours
-        timestamp = ''.join((
+        self.timestamp = ''.join((
             strftime('%Y%m%d'), str(int(strftime('%H')) // 4)
         ))
 
-        uploads_cache_path = path.join(
-            CACHE, f'{username}_upload_cache.{timestamp}.pkl'
+        self.cache_name = path.join(
+            f'{self.username}_upload_cache.{self.timestamp}.pkl'
         )
 
-        uploads = None
+    def get(self):
+        uploads = self.load_cache(self.cache_name, default=list())
 
-        if path.isfile(uploads_cache_path):
-            with open(uploads_cache_path, 'rb') as cache:
-                try:
-                    uploads = pickle.load(cache)
-                    get_uploads = False
-                except EOFError:
-                    get_uploads = True
-        else:
-            get_uploads = True
-
-        if get_uploads or uploads is None:
+        if not uploads:
             query = self.lazy().playlistItems().list(
                 part='contentDetails, snippet',
-                playlistId=uploads_id,
+                playlistId=self.uploads_id,
                 maxResults=25,
             )
 
             if COLOR:
                 clear_line()
-                stdout.write(f'\rfetching videos from {username}...')
+                stdout.write(f'\rfetching videos from {self.username}...')
 
             response = query.execute()
             sleep(self.rate_limit)
-            uploads = response['items']
 
-            with open(uploads_cache_path, 'wb') as cache:
-                pickle.dump(uploads, cache)
+            uploads = response['items']
+            self.save_cache(self.cache_name, data=uploads)
 
         return uploads
+
+
+class ViewHistory(Cachable):
+    '''
+    Keep track of which videos have been viewed.
+    '''
+    def __init__(self):
+        self.cache_name = 'view_history.pkl'
+        self.views = set()
+
+    def add(self, video_id):
+        self.views.add(video_id)
+        self.save_cache(self.cache_name, data=self.views)
+
+    def get(self):
+        self.views = self.load_cache(self.cache_name, default=set())
+        return self.views
 
 
 class Actions:
@@ -210,7 +230,7 @@ class Actions:
         self.title = self.video["title"]
         self.pubdate = self.video['publishedAt'][2:10]
         self.pubtime = self.video['publishedAt'][11:16]
-        self.viewed = self.id in viewed_videos
+        self.viewed = self.id in VIEWS.get()
 
     def message(self, _action):
         stdout.write(' '.join([
@@ -256,8 +276,10 @@ class Actions:
 
         self.message('opening')
         system(new_tab_cmd.get(BROWSER, '#') % shellescape(self.url))
+        self.mark_as_watched()
 
     def mark_as_watched(self):
+        VIEWS.add(self.id)
         self.message('marked as watched')
 
     def list(self, index, search_string=None):
@@ -317,18 +339,23 @@ def sort_by_date(videos):
     )
 
 
-def get_videos(youtube_api, subscriptions, max_vids_displayed_per_channel):
+def sort_by_user(videos):
+    return sorted(
+        videos, key=lambda v: v['channelTitle']
+    )
+
+
+def get_videos(subscriptions, max_vids_displayed_per_channel):
     for user in subscriptions:
         if user.startswith('UC') and len(user) == 24:
-            channel_id, uploads_id = (user, re.sub('^UC', 'UU', user))
+            channel_id = user
         else:
-            channel_id, uploads_id = youtube_api.get_id_of_channel(user)
+            channel_id = SUBSCRIPTIONS.get(user)
 
-        uploads = youtube_api.get_latest_uploads_from_channel(
+        uploads = ChannelUploads(
             username=user,
             channel_id=channel_id,
-            uploads_id=uploads_id,
-        )
+        ).get()
 
         count = 0
 
@@ -340,9 +367,9 @@ def get_videos(youtube_api, subscriptions, max_vids_displayed_per_channel):
             yield item['snippet']
 
 
-def list_videos(videos, *args, **kwargs):
+def list_videos(videos, **kwargs):
     for index, video in enumerate(VIDEOS):
-        Actions(video).list(index, *args, **kwargs)
+        Actions(video).list(index, **kwargs)
 
 
 def get_subscriptions():
@@ -357,28 +384,11 @@ def get_subscriptions():
 if __name__ == '__main__':
     cols, _ = get_terminal_size(0)
     max_vids_displayed_per_channel = 5
-    max_vids_requested_per_channel = 25
-    api = YouTubeAPI()
+    max_vids_requested_per_channel = 50
 
-    view_cache = path.join(CACHE, 'viewed_videos.pkl')
-
-    def cache_views():
-        with open(view_cache, 'wb') as cache:
-            debug('cached viewed_videos')
-            pickle.dump(viewed_videos, cache)
-
-    atexit.register(cache_views)
-
-    viewed_videos = set()
-
-    if path.isfile(view_cache):
-        with open(view_cache, 'rb') as cache:
-            try:
-                viewed_videos = pickle.load(cache)
-            except EOFError:
-                viewed_videos = set()
-
-    VIDEOS = list(get_videos(api, get_subscriptions(), 5))
+    SUBSCRIPTIONS = ChannelIDs()
+    VIEWS = ViewHistory()
+    VIDEOS = list(get_videos(get_subscriptions(), 5))
 
     if not args.interactive:
         list_videos(VIDEOS)
@@ -388,6 +398,7 @@ if __name__ == '__main__':
 
     while RUN:
         try:
+            clear_line()
             choice = input(f'\033[1mYTLS $\033[0m ')
         except (EOFError, KeyboardInterrupt):
             RUN = False
@@ -395,23 +406,37 @@ if __name__ == '__main__':
 
         if choice in ('?', 'help'):
             stdout.write('''
+CATAGORY
+==============================================================================
 SHORT   LONG         DESCRIPTION
+
+
+GENERAL
 ==============================================================================
 ?       help         display this message
+q       quit         quit
+f       fetch        fetch latest videos from YouTube (or from local cache)
+n N     number N     when fetching, display N videos (5 by default)
 
-a N F   audio N F    rip audio from video N (optionally; in format F (mp3 by default))
-d N     download N   download video N
+
+VIDEOS
+==============================================================================
+a N F   audio N F    rip audio from video N (optionally; in format F
+                     (mp3 by default))
+dl N    download N   download video N
 o N     open N       open video N in $BROWSER
 w N     watched N    mark video N as watched
 
-h       hide         hide watched videos
-u       unhide       unhide watched videos
 
-f       fetch        fetch latest videos from YouTube
+LISTING
+==============================================================================
 l       list         list videos
+h       hide         hide watched videos
+H       unhide       unhide watched videos
+d       date         sort by upload date
+u       user         sort by username
 g RE    grep RE      filter videos with regex RE
 
-q       quit         quit
 
 ''')
             continue
@@ -427,7 +452,7 @@ q       quit         quit
             HIDE = True
             continue
 
-        if choice in ('u', 'unhide'):
+        if choice in ('H', 'unhide'):
             HIDE = False
             continue
 
@@ -435,28 +460,42 @@ q       quit         quit
             list_videos(VIDEOS)
             continue
 
-        if choice in ('s', 'sort'):
-            VIDEOS = sort_by_date(VIDEOS)
-
         if choice.startswith(('g', 'grep')):
             _, _, pattern = choice.partition(' ')
             list_videos(VIDEOS, search_string=pattern)
+            continue
 
-        if choice.startswith(('f', 'fetch')):
+        if choice.startswith(('n', 'number')):
             _, _, num_videos = choice.partition(' ')
 
-            num_videos = min(
+            if num_videos == '':
+                num_videos = 5
+
+            max_vids_displayed_per_channel = min(
                 max_vids_requested_per_channel, int(num_videos)
             )
+            continue
 
-            VIDEOS = list(get_videos(api, get_subscriptions(), num_videos))
+        if choice in ('f', 'fetch'):
+            VIDEOS = list(get_videos(get_subscriptions(), max_vids_displayed_per_channel))
+            list_videos(VIDEOS)
+            continue
+
+        if choice in ('u', 'user'):
+            VIDEOS = sort_by_user(VIDEOS)
+            list_videos(VIDEOS)
+            continue
+
+        if choice in ('d', 'date'):
+            VIDEOS = sort_by_date(VIDEOS)
+            list_videos(VIDEOS)
             continue
 
         # ==============================================================
         # Doing stuff to / with videos
         # ==============================================================
 
-        if re.match(r'^((d(l|own(load)?))|(o(pen)?)|(w(atched)?))(\s[0-9]+)+$', choice):
+        if re.match(r'^(d(l|own(load)?)|(o(pen)?)|(w(atched)?))(\s[0-9]+)+$', choice):
             action, *choice = choice.split()
 
         elif re.match(r'^a(udio)?(\s[0-9]+)+$', choice):
@@ -482,11 +521,9 @@ q       quit         quit
                 Actions(VIDEOS[c]).download()
 
             elif action.startswith('o'):
-                viewed_videos.add(id)
                 Actions(VIDEOS[c]).open_in_browser()
 
             elif action.startswith('w'):
-                viewed_videos.add(id)
                 Actions(VIDEOS[c]).mark_as_watched()
                 continue
 
