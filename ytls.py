@@ -5,6 +5,7 @@ import atexit
 import pickle
 import re
 import readline
+import string
 from argparse import ArgumentParser
 from os import get_terminal_size, getenv, isatty, makedirs, path, popen, system
 from pprint import pprint
@@ -28,17 +29,11 @@ argparser.add_argument('-c', '--color', dest='color', action='store_true',
 argparser.add_argument('-C', '--no-color', dest='nocolor', action='store_true',
                        help='non-colored output')
 
-argparser.add_argument('-H', '--hide', dest='hide', action='store_true',
-                       help='hide previously opened videos')
-
-argparser.add_argument('-i', '--interactive', dest='interactive', action='store_true',
-                       help=f'interactive mode')
-
 args = argparser.parse_args()
 
 DEBUG = False or args.debug
 COLOR = (args.color or True) and not args.nocolor
-HIDE = False or args.hide
+HIDE = False
 ISATTY = isatty(0)
 
 
@@ -286,8 +281,11 @@ class Actions:
         if self.viewed and HIDE:
             return
 
+        title = self.title
+        title = re.sub(f'[^{string.printable}]', '_', title)
+
         if search_string is not None:
-            results = re.search(search_string, self.title, flags=re.IGNORECASE)
+            results = re.search(search_string, title, flags=re.IGNORECASE)
             if not results:
                 return
 
@@ -308,11 +306,11 @@ class Actions:
         ))
 
         if (len(self.title) > max_title_len):
-            title = f' {self.title[:(max_title_len)]}… '
+            title = f' {title[:(max_title_len)]}… '
         elif COLOR:
-            title = f' {self.title}' + (' ' * (max_title_len - (len(self.title) - 1))) + ' '
+            title = f' {title}' + (' ' * (max_title_len - (len(self.title) - 1))) + ' '
         else:
-            title = f' {self.title} '
+            title = f' {title} '
 
         try:
             if search_string is not None:
@@ -345,7 +343,7 @@ def sort_by_user(videos):
     )
 
 
-def get_videos(subscriptions, max_vids_displayed_per_channel):
+def get_videos(subscriptions):
     for user in subscriptions:
         if user.startswith('UC') and len(user) == 24:
             channel_id = user
@@ -360,7 +358,7 @@ def get_videos(subscriptions, max_vids_displayed_per_channel):
         count = 0
 
         for item in uploads:
-            if count == max_vids_displayed_per_channel:
+            if count == SETTINGS.max_vids_displayed_per_channel:
                 break
             count += 1
 
@@ -381,22 +379,20 @@ def get_subscriptions():
         )
 
 
-if __name__ == '__main__':
-    cols, _ = get_terminal_size(0)
+class Settings():
     max_vids_displayed_per_channel = 5
     max_vids_requested_per_channel = 50
 
+
+if __name__ == '__main__':
+    SETTINGS = Settings()
     SUBSCRIPTIONS = ChannelIDs()
     VIEWS = ViewHistory()
-    VIDEOS = list(get_videos(get_subscriptions(), 5))
-
-    if not args.interactive:
-        list_videos(VIDEOS)
-        exit()
-
+    VIDEOS = list(get_videos(get_subscriptions()))
     RUN = True
 
     while RUN:
+        cols, _ = get_terminal_size(0)
         try:
             clear_line()
             choice = input(f'\033[1mYTLS $\033[0m ')
@@ -469,15 +465,16 @@ g RE    grep RE      filter videos with regex RE
             _, _, num_videos = choice.partition(' ')
 
             if num_videos == '':
-                num_videos = 5
+                print(SETTINGS.max_vids_displayed_per_channel)
+                continue
 
-            max_vids_displayed_per_channel = min(
-                max_vids_requested_per_channel, int(num_videos)
+            SETTINGS.max_vids_displayed_per_channel = min(
+                SETTINGS.max_vids_requested_per_channel, int(num_videos)
             )
             continue
 
         if choice in ('f', 'fetch'):
-            VIDEOS = list(get_videos(get_subscriptions(), max_vids_displayed_per_channel))
+            VIDEOS = list(get_videos(get_subscriptions()))
             list_videos(VIDEOS)
             continue
 
