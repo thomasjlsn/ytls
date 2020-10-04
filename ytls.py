@@ -28,9 +28,6 @@ argparser.add_argument('-c', '--color', dest='color', action='store_true',
 argparser.add_argument('-C', '--no-color', dest='nocolor', action='store_true',
                        help='non-colored output')
 
-argparser.add_argument('-d', '--download', dest='download', action='store_true',
-                       help='download video of choice with `youtube-dl`')
-
 argparser.add_argument('-H', '--hide', dest='hide', action='store_true',
                        help='hide previously opened videos')
 
@@ -56,8 +53,8 @@ def clear_line():
 color_codes = {
     'debug':        ('31;1', '31;1'),
     'timestamp':    ('2',    '2'),
-    'url':          ('34;4', '35;4'),
-    'channel':      ('1',    '2'),
+    'url':          ('34;4', '35;4;2'),
+    'channel':      ('1',    '1'),
     'index':        ('1',    '2'),
     'text':         ('0',    '0'),
 }
@@ -251,7 +248,7 @@ class Actions:
                        .read().strip().split()) or None
 
         if browser_pid is None:
-            system(' '.join(['1>&2 2>/dev/null', BROWSER, '&']))
+            system(' '.join(['1>&2 2>/dev/null exec', BROWSER, '&']))
 
         new_tab_cmd = {
             'firefox': 'firefox -new-tab %s',
@@ -264,7 +261,6 @@ class Actions:
         self.message('marked as watched')
 
     def list(self, index, search_string=None):
-
         if self.viewed and HIDE:
             return
 
@@ -315,6 +311,12 @@ class Actions:
         writer('url', f'{self.url}\n')
 
 
+def sort_by_date(videos):
+    return sorted(
+        videos, key=lambda v: int(re.sub('[^0-9]', '', v['publishedAt']))
+    )
+
+
 def get_videos(youtube_api, subscriptions, max_vids_displayed_per_channel):
     for user in subscriptions:
         if user.startswith('UC') and len(user) == 24:
@@ -343,17 +345,19 @@ def list_videos(videos, *args, **kwargs):
         Actions(video).list(index, *args, **kwargs)
 
 
-if __name__ == '__main__':
+def get_subscriptions():
     with open('subscriptions.txt', 'r') as subs:
-        my_subscriptions = (
+        return (
             line.strip().split(' #')[0].strip()
             for line in subs.readlines()
             if not line.strip().startswith('#')
         )
 
+
+if __name__ == '__main__':
     cols, _ = get_terminal_size(0)
-    # max_vids_displayed_per_channel = 5
-    # max_vids_requested_per_channel = 25
+    max_vids_displayed_per_channel = 5
+    max_vids_requested_per_channel = 25
     api = YouTubeAPI()
 
     view_cache = path.join(CACHE, 'viewed_videos.pkl')
@@ -374,7 +378,7 @@ if __name__ == '__main__':
             except EOFError:
                 viewed_videos = set()
 
-    VIDEOS = list(get_videos(api, my_subscriptions, 5))
+    VIDEOS = list(get_videos(api, get_subscriptions(), 5))
 
     if not args.interactive:
         list_videos(VIDEOS)
@@ -383,15 +387,14 @@ if __name__ == '__main__':
     RUN = True
 
     while RUN:
-        while 1:
-            try:
-                choice = input(f'\033[1mYTLS $\033[0m ')
-            except (EOFError, KeyboardInterrupt):
-                RUN = False
-                break
+        try:
+            choice = input(f'\033[1mYTLS $\033[0m ')
+        except (EOFError, KeyboardInterrupt):
+            RUN = False
+            break
 
-            if choice in ('?', 'help'):
-                stdout.write('''
+        if choice in ('?', 'help'):
+            stdout.write('''
 SHORT   LONG         DESCRIPTION
 ==============================================================================
 ?       help         display this message
@@ -411,68 +414,81 @@ g RE    grep RE      filter videos with regex RE
 q       quit         quit
 
 ''')
+            continue
+
+        if choice == '':
+            continue
+
+        if choice in ('q', 'quit'):
+            RUN = False
+            break
+
+        if choice in ('h', 'hide'):
+            HIDE = True
+            continue
+
+        if choice in ('u', 'unhide'):
+            HIDE = False
+            continue
+
+        if choice in ('l', 'ls', 'list'):
+            list_videos(VIDEOS)
+            continue
+
+        if choice in ('s', 'sort'):
+            VIDEOS = sort_by_date(VIDEOS)
+
+        if choice.startswith(('g', 'grep')):
+            _, _, pattern = choice.partition(' ')
+            list_videos(VIDEOS, search_string=pattern)
+
+        if choice.startswith(('f', 'fetch')):
+            _, _, num_videos = choice.partition(' ')
+
+            num_videos = min(
+                max_vids_requested_per_channel, int(num_videos)
+            )
+
+            VIDEOS = list(get_videos(api, get_subscriptions(), num_videos))
+            continue
+
+        # ==============================================================
+        # Doing stuff to / with videos
+        # ==============================================================
+
+        if re.match(r'^((d(l|own(load)?))|(o(pen)?)|(w(atched)?))(\s[0-9]+)+$', choice):
+            action, *choice = choice.split()
+
+        elif re.match(r'^a(udio)?(\s[0-9]+)+$', choice):
+            action, *choice = choice.split()
+            audio_format = 'mp3'
+
+        elif re.match(r'^a(udio)?(\s[0-9]+)+\s[a-zA-Z0-9]+$', choice):
+            action, *choice, audio_format = choice.split()
+
+        else:
+            continue
+
+        choice = [int(c) for c in choice]
+
+        for c in choice:
+            if c not in range(0, len(VIDEOS)):
                 continue
 
-            if choice == '':
+            if action.startswith('a'):
+                Actions(VIDEOS[c]).rip_audio(audio_format)
+
+            elif action.startswith('d'):
+                Actions(VIDEOS[c]).download()
+
+            elif action.startswith('o'):
+                viewed_videos.add(id)
+                Actions(VIDEOS[c]).open_in_browser()
+
+            elif action.startswith('w'):
+                viewed_videos.add(id)
+                Actions(VIDEOS[c]).mark_as_watched()
                 continue
-
-            if choice in ('q', 'quit'):
-                RUN = False
-                break
-
-            if choice in ('h', 'hide'):
-                HIDE = True
-                break
-
-            if choice in ('u', 'unhide'):
-                HIDE = False
-                break
-
-            if choice in ('l', 'ls', 'list'):
-                list_videos(VIDEOS)
-                continue
-
-            if choice.startswith(('g ', 'grep ')):
-                _, _, pattern = choice.partition(' ')
-                list_videos(VIDEOS, search_string=pattern)
-
-            # ==============================================================
-            # Doing stuff to / with videos
-            # ==============================================================
-
-            if re.match(r'^((d(l|own(load)?))|(o(pen)?)|(w(atched)?))(\s[0-9]+)+$', choice):
-                action, *choice = choice.split()
-
-            elif re.match(r'^a(udio)?(\s[0-9]+)+$', choice):
-                action, *choice = choice.split()
-                audio_format = 'mp3'
-
-            elif re.match(r'^a(udio)?(\s[0-9]+)+\s[a-zA-Z0-9]+$', choice):
-                action, *choice, audio_format = choice.split()
 
             else:
-                continue
-
-            choice = [int(c) for c in choice]
-
-            for c in choice:
-                if c not in range(0, len(VIDEOS)):
-                    continue
-
-                if action.startswith('a'):
-                    Actions(VIDEOS[c]).rip_audio(audio_format)
-
-                elif action.startswith('d'):
-                    Actions(VIDEOS[c]).download()
-
-                elif action.startswith('o'):
-                    viewed_videos.add(id)
-                    Actions(VIDEOS[c]).open_in_browser()
-
-                elif action.startswith('w'):
-                    viewed_videos.add(id)
-                    Actions(VIDEOS[c]).mark_as_watched()
-                    continue
-
-                else:
-                    raise Exception
+                raise Exception
