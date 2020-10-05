@@ -6,8 +6,7 @@ import pickle
 import re
 import readline
 import string
-from argparse import ArgumentParser
-from os import get_terminal_size, getenv, isatty, makedirs, path, popen, system
+from os import get_terminal_size, getenv, makedirs, path, popen, system
 from pprint import pprint
 from shlex import quote as shellescape
 from sys import stderr, stdout
@@ -18,23 +17,12 @@ HOME = getenv('HOME')
 XDG_CACHE_HOME = getenv('XDG_CACHE_HOME', default=path.join(HOME, '.cache'))
 XDG_DOWNLOADS_DIR = getenv('XDG_DOWNLOADS_DIR', default=path.join(HOME, 'Downloads'))
 
-argparser = ArgumentParser()
 
-argparser.add_argument('--debug', dest='debug', action='store_true',
-                       help='enable debug output')
-
-argparser.add_argument('-c', '--color', dest='color', action='store_true',
-                       help='(default) colored output')
-
-argparser.add_argument('-C', '--no-color', dest='nocolor', action='store_true',
-                       help='non-colored output')
-
-args = argparser.parse_args()
-
-DEBUG = False or args.debug
-COLOR = (args.color or True) and not args.nocolor
-HIDE = False
-ISATTY = isatty(0)
+class Settings():
+    VIDS_DISPLAYED_PER_CHANNEL = 5
+    VIDS_REQUESTED_PER_CHANNEL = 50
+    DEBUG = False
+    HIDE = False
 
 
 def clear_line():
@@ -52,7 +40,7 @@ color_codes = {
 
 
 def colored(viewed=False, color_key=None, string=''):
-    if COLOR and color_key:
+    if color_key:
         if viewed:
             return f'\033[{color_codes[color_key][1]}m{string}\033[0m'
         else:
@@ -61,7 +49,7 @@ def colored(viewed=False, color_key=None, string=''):
 
 
 def debug(string):
-    if DEBUG:
+    if SETTINGS.DEBUG:
         stderr.write(f'\n[{colored(viewed=False, color_key="debug", string="DEBUG")}] {string}\n')
 
 
@@ -140,9 +128,8 @@ class ChannelIDs(YouTubeAPI, Cachable):
                 forUsername=username,
             )
 
-            if COLOR:
-                clear_line()
-                stdout.write(f'\rfetching channel id for {username}...')
+            clear_line()
+            stdout.write(f'\rfetching channel id for {username}...')
 
             response = query.execute()
             sleep(self.rate_limit)
@@ -173,19 +160,18 @@ class ChannelUploads(YouTubeAPI, Cachable):
             f'{self.username}_upload_cache.{self.timestamp}.pkl'
         )
 
-    def get(self):
+    def get(self, force=False):
         uploads = self.load_cache(self.cache_name, default=list())
 
-        if not uploads:
+        if not uploads or force:
             query = self.lazy().playlistItems().list(
                 part='contentDetails, snippet',
                 playlistId=self.uploads_id,
                 maxResults=25,
             )
 
-            if COLOR:
-                clear_line()
-                stdout.write(f'\rfetching videos from {self.username}...')
+            clear_line()
+            stdout.write(f'\rfetching videos from {self.username}...')
 
             response = query.execute()
             sleep(self.rate_limit)
@@ -278,7 +264,7 @@ class Actions:
         self.message('marked as watched')
 
     def list(self, index, search_string=None):
-        if self.viewed and HIDE:
+        if self.viewed and SETTINGS.HIDE:
             return
 
         title = self.title
@@ -299,18 +285,17 @@ class Actions:
 
         # debug(f'cols={cols}, title={len(self.title)} max={max_title_len}')
 
-        writer = lambda color_key, string: stdout.write(colored(
-            viewed=self.viewed,
-            color_key=color_key,
-            string=string,
-        ))
+        def writer(color_key, string):
+            stdout.write(colored(
+                viewed=self.viewed,
+                color_key=color_key,
+                string=string,
+            ))
 
         if (len(self.title) > max_title_len):
             title = f' {title[:(max_title_len)]}… '
-        elif COLOR:
-            title = f' {title}' + (' ' * (max_title_len - (len(self.title) - 1))) + ' '
         else:
-            title = f' {title} '
+            title = f' {title}' + (' ' * (max_title_len - (len(self.title) - 1))) + ' '
 
         try:
             if search_string is not None:
@@ -321,9 +306,7 @@ class Actions:
         except AttributeError:
             title = title
 
-        if COLOR:
-            clear_line()
-
+        clear_line()
         writer('index', f'{str(index).ljust(index_column_width)} ')
         writer('timestamp', ' '.join([self.pubdate, self.pubtime]))
         writer('channel',   f' {self.channel}:')
@@ -343,7 +326,7 @@ def sort_by_user(videos):
     )
 
 
-def get_videos(subscriptions):
+def get_videos(subscriptions, force=False):
     for user in subscriptions:
         if user.startswith('UC') and len(user) == 24:
             channel_id = user
@@ -353,12 +336,12 @@ def get_videos(subscriptions):
         uploads = ChannelUploads(
             username=user,
             channel_id=channel_id,
-        ).get()
+        ).get(force=force)
 
         count = 0
 
         for item in uploads:
-            if count == SETTINGS.max_vids_displayed_per_channel:
+            if count == SETTINGS.VIDS_DISPLAYED_PER_CHANNEL:
                 break
             count += 1
 
@@ -379,9 +362,6 @@ def get_subscriptions():
         )
 
 
-class Settings():
-    max_vids_displayed_per_channel = 5
-    max_vids_requested_per_channel = 50
 
 
 if __name__ == '__main__':
@@ -389,15 +369,13 @@ if __name__ == '__main__':
     SUBSCRIPTIONS = ChannelIDs()
     VIEWS = ViewHistory()
     VIDEOS = list(get_videos(get_subscriptions()))
-    RUN = True
 
-    while RUN:
+    while True:
         cols, _ = get_terminal_size(0)
         try:
             clear_line()
             choice = input(f'\033[1mYTLS $\033[0m ')
         except (EOFError, KeyboardInterrupt):
-            RUN = False
             break
 
         if choice in ('?', 'help'):
@@ -441,15 +419,14 @@ g RE    grep RE      filter videos with regex RE
             continue
 
         if choice in ('q', 'quit'):
-            RUN = False
             break
 
         if choice in ('h', 'hide'):
-            HIDE = True
+            SETTINGS.HIDE = True
             continue
 
         if choice in ('H', 'unhide'):
-            HIDE = False
+            SETTINGS.HIDE = False
             continue
 
         if choice in ('l', 'ls', 'list'):
@@ -465,18 +442,24 @@ g RE    grep RE      filter videos with regex RE
             _, _, num_videos = choice.partition(' ')
 
             if num_videos == '':
-                print(SETTINGS.max_vids_displayed_per_channel)
+                print(SETTINGS.VIDS_DISPLAYED_PER_CHANNEL)
                 continue
 
-            SETTINGS.max_vids_displayed_per_channel = min(
-                SETTINGS.max_vids_requested_per_channel, int(num_videos)
+            SETTINGS.VIDS_DISPLAYED_PER_CHANNEL = min(
+                SETTINGS.VIDS_REQUESTED_PER_CHANNEL, int(num_videos)
             )
+            continue
+
+        if choice.startswith(('f ', 'fetch ')) and choice.endswith(('f', 'force')):
+            VIDEOS = list(get_videos(get_subscriptions(), force=True))
+            list_videos(VIDEOS)
             continue
 
         if choice in ('f', 'fetch'):
             VIDEOS = list(get_videos(get_subscriptions()))
             list_videos(VIDEOS)
             continue
+
 
         if choice in ('u', 'user'):
             VIDEOS = sort_by_user(VIDEOS)
