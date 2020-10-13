@@ -277,7 +277,9 @@ class Actions:
                     ] or None
 
                 if browser_pid() is None:
-                    os.system(f'1>&2 2>/dev/null nohup {BROWSER}&')
+                    os.system(
+                        f'bash -c -- "1>&2 2>/dev/null {BROWSER}& disown"'
+                    )
 
                 new_tab_cmd = {
                     'firefox': 'firefox -new-tab %s',
