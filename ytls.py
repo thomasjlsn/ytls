@@ -209,21 +209,28 @@ class VideoDetails(YouTubeAPI):
         return stats
 
 
-class ViewHistory(Cachable):
-    '''
-    Keep track of which videos have been viewed.
-    '''
-    def __init__(self):
-        self.cache_name = 'view_history.pkl'
-        self.views = set()
+class Video:
+    def __init__(self, video):
+        self.id = video['resourceId']['videoId']
+        self.url = f'https://youtube.com/watch?v={self.id}'
+        self.channel = video['channelTitle']
+        self.title = video["title"]
+        self.pubdate = video['publishedAt'][2:10]
+        self.pubtime = video['publishedAt'][11:16]
+        self.viewed = self.id in VIEWS.get()
 
-    def add(self, video_id):
-        self.views.add(video_id)
-        self.save_cache(self.cache_name, data=self.views)
+        clear_line()
+        stdout.write(f'\rfetching details of video "{self.title}"...')
+        self._details = VideoDetails(video_id=self.id).get(force=False)
 
-    def get(self):
-        self.views = self.load_cache(self.cache_name, default=set())
-        return self.views
+        self.description = self._details[0]['snippet'].get('description', None)
+        self.comments = int(self._details[0]['statistics'].get('commentCount', 0))
+        self.dislikes = int(self._details[0]['statistics'].get('dislikeCount', 0))
+        self.likes = int(self._details[0]['statistics'].get('likeCount', 0))
+        self.views = int(self._details[0]['statistics'].get('viewCount', 0))
+
+        # pprint(self._details)
+        # exit(7)
 
 
 class Actions:
@@ -356,30 +363,6 @@ class Actions:
             stdout.write('\n')
 
 
-class Video:
-    def __init__(self, video):
-        self.id = video['resourceId']['videoId']
-        self.url = f'https://youtube.com/watch?v={self.id}'
-        self.channel = video['channelTitle']
-        self.title = video["title"]
-        self.pubdate = video['publishedAt'][2:10]
-        self.pubtime = video['publishedAt'][11:16]
-        self.viewed = self.id in VIEWS.get()
-
-        clear_line()
-        stdout.write(f'\rfetching details of video "{self.title}"...')
-        self._details = VideoDetails(video_id=self.id).get(force=False)
-
-        self.description = self._details[0]['snippet'].get('description', None)
-        self.comments = int(self._details[0]['statistics'].get('commentCount', 0))
-        self.dislikes = int(self._details[0]['statistics'].get('dislikeCount', 0))
-        self.likes = int(self._details[0]['statistics'].get('likeCount', 0))
-        self.views = int(self._details[0]['statistics'].get('viewCount', 0))
-
-        # pprint(self._details)
-        # exit(7)
-
-
 class Sorted:
     '''
     Sort operations for Video objects
@@ -414,6 +397,23 @@ class Sorted:
     @property
     def reversed(self):
         return Sorted(list(reversed(self.value)))
+
+
+class ViewHistory(Cachable):
+    '''
+    Keep track of which videos have been viewed.
+    '''
+    def __init__(self):
+        self.cache_name = 'view_history.pkl'
+        self.views = set()
+
+    def add(self, video_id):
+        self.views.add(video_id)
+        self.save_cache(self.cache_name, data=self.views)
+
+    def get(self):
+        self.views = self.load_cache(self.cache_name, default=set())
+        return self.views
 
 
 def get_videos(subscriptions, force=False):
