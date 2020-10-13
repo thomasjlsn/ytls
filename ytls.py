@@ -406,6 +406,16 @@ class Sorted:
         )
 
     @property
+    def by_likes(self):
+        self.keychain.append(
+            lambda v: str(v.likes)
+        )
+        return Sorted(
+            videos=self.videos,
+            keychain=self.keychain
+        )
+
+    @property
     def by_views(self):
         self.keychain.append(
             lambda v: str(v.views)
