@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """Get the latest N uploads from a list of channels."""
 
-import atexit
+import os
 import pickle
 import re
 import readline
 import string
-from os import get_terminal_size, getenv, makedirs, path, popen, system
 from pprint import pprint
 from shlex import quote as shellescape
+from shutil import which
 from sys import stderr, stdout
 from time import sleep, strftime
 
-BROWSER = getenv('BROWSER', default='firefox')
-HOME = getenv('HOME')
-XDG_CACHE_HOME = getenv('XDG_CACHE_HOME', default=path.join(HOME, '.cache'))
-XDG_DOWNLOADS_DIR = getenv('XDG_DOWNLOADS_DIR', default=path.join(HOME, 'Downloads'))
+BROWSER = os.getenv('BROWSER', default='firefox')
+HOME = os.getenv('HOME')
+XDG_CACHE_HOME = os.getenv('XDG_CACHE_HOME', default=os.path.join(HOME, '.cache'))
+XDG_DOWNLOADS_DIR = os.getenv('XDG_DOWNLOADS_DIR', default=os.path.join(HOME, 'Downloads'))
 
 
 class Settings():
-    VIDS_DISPLAYED_PER_CHANNEL = 5
     VIDS_REQUESTED_PER_CHANNEL = 50
     DEBUG = False
     HIDE = False
+    KEYWORDS = set()
+    SHOW_URL = False
 
 
 def clear_line():
@@ -57,16 +58,16 @@ class Cachable:
     '''
     Cache data on disk for faster lookups / persistent session state
     '''
-    cache_base = path.join(XDG_CACHE_HOME, 'youtube_api_v3')
+    cache_base = os.path.join(XDG_CACHE_HOME, 'youtube_api_v3')
 
-    if not path.isdir(cache_base):
-        makedirs(cache_base)
+    if not os.path.isdir(cache_base):
+        os.makedirs(cache_base)
 
     def load_cache(self, cache_name, default=None):
-        cache_path = path.join(self.cache_base, cache_name)
+        cache_path = os.path.join(self.cache_base, cache_name)
         cache_data = None
 
-        if path.isfile(cache_path):
+        if os.path.isfile(cache_path):
             with open(cache_path, 'rb') as cache:
                 try:
                     cache_data = pickle.load(cache)
@@ -78,14 +79,14 @@ class Cachable:
         return cache_data
 
     def save_cache(self, cache_name, data=None):
-        cache_path = path.join(self.cache_base, cache_name)
+        cache_path = os.path.join(self.cache_base, cache_name)
 
         if data is not None:
             with open(cache_path, 'wb') as cache:
                 pickle.dump(data, cache)
 
 
-class LazyLoader:
+class LazyLoaded:
     '''
     The Google API lib is slooooooooooow to import,
     this class lazily loads it with the lazy() method.
@@ -103,7 +104,7 @@ class LazyLoader:
         return self._api
 
 
-class YouTubeAPI(LazyLoader):
+class YouTubeAPI(Cachable, LazyLoaded):
     '''
     Methods querying the YouTube API.
     '''
@@ -111,9 +112,9 @@ class YouTubeAPI(LazyLoader):
     rate_limit = ((((24 * max_duty_cycle) * 60) * 60) / 10000)
 
 
-class ChannelIDs(YouTubeAPI, Cachable):
+class ChannelID(YouTubeAPI):
     '''
-    Get id of a channel
+    Get id of a channel.
     '''
     def __init__(self):
         self.cache_name = 'channel_ids.pkl'
@@ -122,17 +123,16 @@ class ChannelIDs(YouTubeAPI, Cachable):
         ids = self.load_cache(self.cache_name, default=dict())
         channel_id = ids.get(username, None)
 
+        clear_line()
+        stdout.write(f'\rfetching channel id for "{username}"...')
+
         if channel_id is None:
             query = self.lazy().channels().list(
                 part='contentDetails',
                 forUsername=username,
             )
 
-            clear_line()
-            stdout.write(f'\rfetching channel id for {username}...')
-
             response = query.execute()
-            sleep(self.rate_limit)
 
             channel_id = response['items'][-1]['id']
             ids[username] = channel_id
@@ -142,44 +142,71 @@ class ChannelIDs(YouTubeAPI, Cachable):
         return channel_id
 
 
-class ChannelUploads(YouTubeAPI, Cachable):
+class ChannelUploads(YouTubeAPI):
     '''
-    Get uploads from a channel
+    Get uploads from a channel.
     '''
-    def __init__(self, username=None, channel_id=None):
+    def __init__(self, username=None, channel_id=None, timestamp=''):
         self.channel_id = channel_id
         self.uploads_id = re.sub('^UC', 'UU', self.channel_id)
         self.username = username
 
-        # cache uploads lasting for four hours
-        self.timestamp = ''.join((
-            strftime('%Y%m%d'), str(int(strftime('%H')) // 4)
-        ))
-
-        self.cache_name = path.join(
-            f'{self.username}_upload_cache.{self.timestamp}.pkl'
+        self.cache_name = os.path.join(
+            f'{self.channel_id}.{timestamp.ljust(10, "0")}.pkl'
         )
 
     def get(self, force=False):
         uploads = self.load_cache(self.cache_name, default=list())
 
+        clear_line()
+        stdout.write(f'\rfetching videos from "{self.username}"...')
+
         if not uploads or force:
             query = self.lazy().playlistItems().list(
                 part='contentDetails, snippet',
                 playlistId=self.uploads_id,
-                maxResults=25,
+                maxResults=SETTINGS.VIDS_REQUESTED_PER_CHANNEL,
             )
 
-            clear_line()
-            stdout.write(f'\rfetching videos from {self.username}...')
-
             response = query.execute()
-            sleep(self.rate_limit)
+            # sleep(self.rate_limit)
 
             uploads = response['items']
             self.save_cache(self.cache_name, data=uploads)
 
         return uploads
+
+
+class VideoDetails(YouTubeAPI):
+    '''
+    Get information about a specific video.
+    '''
+    def __init__(self, video_id=None, timestamp=''):
+        if type(video_id) == 'list':
+            self.video_id = ', '.join(video_id)
+        else:
+            self.video_id = video_id
+
+        self.cache_name = os.path.join(
+            f'{self.video_id}.{timestamp.ljust(10, "0")}.pkl'
+        )
+
+    def get(self, force=False):
+        stats = self.load_cache(self.cache_name, default=list())
+
+        if not stats or force:
+            query = self.lazy().videos().list(
+                part='statistics, contentDetails, snippet',
+                id=self.video_id,
+            )
+
+            response = query.execute()
+            # sleep(self.rate_limit)
+
+            stats = response['items']
+            self.save_cache(self.cache_name, data=stats)
+
+        return stats
 
 
 class ViewHistory(Cachable):
@@ -201,17 +228,10 @@ class ViewHistory(Cachable):
 
 class Actions:
     '''
-    Doing stuff to individual videos.
+    Doing stuff to video objects.
     '''
     def __init__(self, video):
         self.video = video
-        self.id = self.video['resourceId']['videoId']
-        self.url = f'https://youtube.com/watch?v={self.id}'
-        self.channel = self.video['channelTitle']
-        self.title = self.video["title"]
-        self.pubdate = self.video['publishedAt'][2:10]
-        self.pubtime = self.video['publishedAt'][11:16]
-        self.viewed = self.id in VIEWS.get()
 
     def message(self, _action):
         stdout.write(' '.join([
@@ -219,55 +239,68 @@ class Actions:
             colored(
                 viewed=False,
                 color_key="channel",
-                string=f'{self.channel}:',
+                string=f'{self.video.channel}:',
             ),
-            f'{self.title}\n',
+            f'{self.video.title}\n',
         ]))
 
     def download(self):
-        self.message('downloading')
-        system(' '.join([
-            f'cd {shellescape(XDG_DOWNLOADS_DIR)}',
-            f'&& youtube-dl {shellescape(self.url)}',
-        ]))
+        if which('youtube-dl'):
+            self.message('downloading')
+            os.system(' '.join([
+                f'cd {shellescape(XDG_DOWNLOADS_DIR)}',
+                f'&& youtube-dl {shellescape(self.video.url)}',
+            ]))
 
     def rip_audio(self, audio_format):
-        audio_formats = ['aac', 'flac', 'mp3', 'm4a', 'opus', 'vorbis', 'wav']
+        if which('youtube-dl'):
+            audio_formats = ['aac', 'flac', 'mp3', 'm4a', 'opus', 'vorbis', 'wav']
 
-        if audio_format not in audio_formats:
-            audio_format = 'mp3'
+            if audio_format not in audio_formats:
+                audio_format = 'mp3'
 
-        self.message(f'ripping {audio_format}')
-        system(' '.join([
-            f'cd {shellescape(XDG_DOWNLOADS_DIR)}',
-            f'&& youtube-dl --extract-audio --audio-format {audio_format}',
-            shellescape(self.url),
-        ]))
+            self.message(f'ripping {audio_format}')
+            os.system(' '.join([
+                f'cd {shellescape(XDG_DOWNLOADS_DIR)}',
+                f'&& youtube-dl --extract-audio --audio-format {audio_format}',
+                shellescape(self.video.url),
+            ]))
 
     def open_in_browser(self):
-        browser_pid = (popen(' '.join(['pidof', shellescape(BROWSER)]))
-                       .read().strip().split()) or None
+        if os.name == 'posix':
+            if which('pidof'):
+                def browser_pid():
+                    return [
+                        p for p in
+                        os.popen(' '.join(['pidof', shellescape(BROWSER)]))
+                        .read().strip().split()
+                    ] or None
 
-        if browser_pid is None:
-            system(' '.join(['1>&2 2>/dev/null exec', BROWSER, '&']))
+                if browser_pid() is None:
+                    os.system(f'1>&2 2>/dev/null nohup {BROWSER}&')
 
-        new_tab_cmd = {
-            'firefox': 'firefox -new-tab %s',
-        }
+                new_tab_cmd = {
+                    'firefox': 'firefox -new-tab %s',
+                }
 
-        self.message('opening')
-        system(new_tab_cmd.get(BROWSER, '#') % shellescape(self.url))
-        self.mark_as_watched()
+                while browser_pid() is None:
+                    sleep(0.1)
+
+                self.message('opening')
+                os.system(new_tab_cmd.get(BROWSER, '#') % shellescape(self.video.url))
+                self.mark_as_watched()
+        else:
+            stderr.write(f'not yet implemented for os type: {os.name}\n')
 
     def mark_as_watched(self):
-        VIEWS.add(self.id)
+        VIEWS.add(self.video.id)
         self.message('marked as watched')
 
     def list(self, index, search_string=None):
-        if self.viewed and SETTINGS.HIDE:
+        if self.video.viewed and SETTINGS.HIDE:
             return
 
-        title = self.title
+        title = self.video.title
         title = re.sub(f'[^{string.printable}]', '_', title)
 
         if search_string is not None:
@@ -278,24 +311,28 @@ class Actions:
         index_column_width = (len(str(len(VIDEOS))))
 
         max_title_len = (cols - ((index_column_width + 1)
-                                 + (len(self.pubdate) + 1)
-                                 + (len(self.pubtime) + 1)
-                                 + (len(self.channel) + 2)
-                                 + (len(self.url) + 2)))
+                                 + ((len(self.video.pubdate) + 1))
+                                 + ((len(self.video.pubtime) + 1))
+                                 + ((len(self.video.channel) + 2))
+                                 + ((len(self.video.url) * SETTINGS.SHOW_URL) + 2)
+                                 ))
 
-        # debug(f'cols={cols}, title={len(self.title)} max={max_title_len}')
+        debug(f'cols={cols}, title={len(self.video.title)} max={max_title_len}')
 
         def writer(color_key, string):
             stdout.write(colored(
-                viewed=self.viewed,
+                viewed=self.video.viewed,
                 color_key=color_key,
                 string=string,
             ))
 
-        if (len(self.title) > max_title_len):
+        if max_title_len < 6:
+            print('screen not wide enough')
+            return
+        elif (len(self.video.title) > max_title_len):
             title = f' {title[:(max_title_len)]}… '
         else:
-            title = f' {title}' + (' ' * (max_title_len - (len(self.title) - 1))) + ' '
+            title = f' {title}' + (' ' * (max_title_len - (len(self.video.title) - 1))) + ' '
 
         try:
             if search_string is not None:
@@ -308,44 +345,112 @@ class Actions:
 
         clear_line()
         writer('index', f'{str(index).ljust(index_column_width)} ')
-        writer('timestamp', ' '.join([self.pubdate, self.pubtime]))
-        writer('channel',   f' {self.channel}:')
+        writer('timestamp', ' '.join([self.video.pubdate, self.video.pubtime]))
+        writer('channel',   f' {self.video.channel}:')
         writer('text', title)
-        writer('url', f'{self.url}\n')
+        if SETTINGS.SHOW_URL:
+            writer('url', f'{self.video.url}\n')
+        else:
+            stdout.write('\n')
 
 
-def sort_by_date(videos):
-    return sorted(
-        videos, key=lambda v: int(re.sub('[^0-9]', '', v['publishedAt']))
-    )
+class Video:
+    def __init__(self, video):
+        self.id = video['resourceId']['videoId']
+        self.url = f'https://youtube.com/watch?v={self.id}'
+        self.channel = video['channelTitle']
+        self.title = video["title"]
+        self.pubdate = video['publishedAt'][2:10]
+        self.pubtime = video['publishedAt'][11:16]
+        self.viewed = self.id in VIEWS.get()
+
+        clear_line()
+        stdout.write(f'\rfetching details of video "{self.title}"...')
+        self._details = VideoDetails(video_id=self.id).get(force=False)
+
+        self.description = self._details[0]['snippet'].get('description', None)
+        self.comments = int(self._details[0]['statistics'].get('commentCount', 0))
+        self.dislikes = int(self._details[0]['statistics'].get('dislikeCount', 0))
+        self.likes = int(self._details[0]['statistics'].get('likeCount', 0))
+        self.views = int(self._details[0]['statistics'].get('viewCount', 0))
+
+        # pprint(self._details)
+        # exit(7)
 
 
-def sort_by_user(videos):
-    return sorted(
-        videos, key=lambda v: v['channelTitle']
-    )
+class Sorted:
+    '''
+    Sort operations for Video objects
+    '''
+    def __init__(self, videos):
+        self.value = videos
+
+    def get(self):
+        return self.value
+
+    @property
+    def by_date(self):
+        return Sorted(sorted(
+            self.value,
+            key=lambda v: int(re.sub(r'[^0-9]', '', ''.join((v.pubdate, v.pubtime))))
+        ))
+
+    @property
+    def by_user(self):
+        return Sorted(sorted(
+            self.value,
+            key=lambda v: v.channel
+        ))
+
+    @property
+    def by_views(self):
+        return Sorted(sorted(
+            self.value,
+            key=lambda v: v.views
+        ))
+
+    @property
+    def reversed(self):
+        return Sorted(list(reversed(self.value)))
 
 
 def get_videos(subscriptions, force=False):
-    for user in subscriptions:
+    for subscription in subscriptions:
+        cl, num, user = subscription
+
         if user.startswith('UC') and len(user) == 24:
             channel_id = user
         else:
             channel_id = SUBSCRIPTIONS.get(user)
 
+        timestamp = {
+            'h': strftime('%Y%m%d%H'),
+            'd': strftime('%Y%m%d'),
+            'w': strftime('%Y%m%U'),
+            'm': strftime('%Y%m'),
+            'y': strftime('%Y'),
+        }.get(
+            cl, ''.join((strftime('%Y%m%d'), str(int(strftime('%H')) // 4)))
+        )
+
         uploads = ChannelUploads(
             username=user,
             channel_id=channel_id,
+            timestamp=timestamp,
         ).get(force=force)
 
         count = 0
 
         for item in uploads:
-            if count == SETTINGS.VIDS_DISPLAYED_PER_CHANNEL:
+            if count == int(num):
                 break
             count += 1
 
-            yield item['snippet']
+            video = Video(item['snippet'])
+            # video = item['snippet']
+            # print(video)
+
+            yield video
 
 
 def list_videos(videos, **kwargs):
@@ -353,30 +458,49 @@ def list_videos(videos, **kwargs):
         Actions(video).list(index, **kwargs)
 
 
-def get_subscriptions():
-    with open('subscriptions.txt', 'r') as subs:
-        return (
-            line.strip().split(' #')[0].strip()
-            for line in subs.readlines()
-            if not line.strip().startswith('#')
-        )
+def parse_config_file():
+    sublist = []
+    with open('subscriptions.conf', 'r') as subs:
+        for line in (l.strip() for l in subs.readlines()):
+            if line.startswith('#'):
+                continue
 
+            if re.match(rf'^[{string.whitespace}]*$', line):
+                continue
 
+            if re.match(r'^[hdmw]\t[0-9]+\t.*$', line):
+                if '#' in line:
+                    line = re.sub('#.*$', '', line).strip()
+                line = line.split('\t')
+                sublist.append(line)
+                continue
+
+            if re.match(r'^[ a-zA-Z0-9()|\\?\[\]{}^$._-]+$', line):
+                SETTINGS.KEYWORDS.add(line.strip())
+                continue
+
+            # print(line)
+        # exit()
+
+    return sublist
 
 
 if __name__ == '__main__':
     SETTINGS = Settings()
-    SUBSCRIPTIONS = ChannelIDs()
+    SUBSCRIPTIONS = ChannelID()
     VIEWS = ViewHistory()
-    VIDEOS = list(get_videos(get_subscriptions()))
+    VIDEOS = list(get_videos(parse_config_file()))
+
+    # Actions(VIDEOS[0]).get_video_details()
 
     while True:
-        cols, _ = get_terminal_size(0)
         try:
             clear_line()
             choice = input(f'\033[1mYTLS $\033[0m ')
         except (EOFError, KeyboardInterrupt):
             break
+
+        cols, _ = os.get_terminal_size(0)
 
         if choice in ('?', 'help'):
             stdout.write('''
@@ -405,10 +529,12 @@ w N     watched N    mark video N as watched
 LISTING
 ==============================================================================
 l       list         list videos
-h       hide         hide watched videos
-H       unhide       unhide watched videos
 d       date         sort by upload date
-u       user         sort by username
+c       channel      sort by channel name
+h       hide         hide watched videos
+H       nohide       show watched videos
+u       url          show url
+U       nourl        hide url
 g RE    grep RE      filter videos with regex RE
 
 
@@ -423,10 +549,22 @@ g RE    grep RE      filter videos with regex RE
 
         if choice in ('h', 'hide'):
             SETTINGS.HIDE = True
+            list_videos(VIDEOS)
             continue
 
-        if choice in ('H', 'unhide'):
+        if choice in ('H', 'nohide'):
             SETTINGS.HIDE = False
+            list_videos(VIDEOS)
+            continue
+
+        if choice in ('u', 'url'):
+            SETTINGS.SHOW_URL = True
+            list_videos(VIDEOS)
+            continue
+
+        if choice in ('U', 'nourl'):
+            SETTINGS.SHOW_URL = False
+            list_videos(VIDEOS)
             continue
 
         if choice in ('l', 'ls', 'list'):
@@ -438,44 +576,58 @@ g RE    grep RE      filter videos with regex RE
             list_videos(VIDEOS, search_string=pattern)
             continue
 
-        if choice.startswith(('n', 'number')):
-            _, _, num_videos = choice.partition(' ')
-
-            if num_videos == '':
-                print(SETTINGS.VIDS_DISPLAYED_PER_CHANNEL)
-                continue
-
-            SETTINGS.VIDS_DISPLAYED_PER_CHANNEL = min(
-                SETTINGS.VIDS_REQUESTED_PER_CHANNEL, int(num_videos)
-            )
+        if choice in ('k', 'keywords'):
+            list_videos(VIDEOS, search_string=f'({"|".join(SETTINGS.KEYWORDS)})')
             continue
 
         if choice.startswith(('f ', 'fetch ')) and choice.endswith(('f', 'force')):
-            VIDEOS = list(get_videos(get_subscriptions(), force=True))
+            VIDEOS = list(get_videos(parse_config_file(), force=True))
             list_videos(VIDEOS)
             continue
 
         if choice in ('f', 'fetch'):
-            VIDEOS = list(get_videos(get_subscriptions()))
+            VIDEOS = list(get_videos(parse_config_file()))
             list_videos(VIDEOS)
             continue
 
+        if choice in ('c', 'channel'):
+            VIDEOS = (Sorted(VIDEOS)
+                      .by_user
+                      .get())
 
-        if choice in ('u', 'user'):
-            VIDEOS = sort_by_user(VIDEOS)
             list_videos(VIDEOS)
             continue
 
         if choice in ('d', 'date'):
-            VIDEOS = sort_by_date(VIDEOS)
+            VIDEOS = (Sorted(VIDEOS)
+                      .by_date
+                      .get())
             list_videos(VIDEOS)
             continue
+
+        if choice in ('v', 'views'):
+            VIDEOS = (Sorted(VIDEOS)
+                      .by_views
+                      .get())
+
+            list_videos(VIDEOS)
+            continue
+
+        # Example of chaining sorts TODO
+        # if choice == 'my new sort':
+        #     VIDEOS = (Sorted(VIDEOS)
+        #               .by_user
+        #               .by_date
+        #               .reversed
+        #               .get())
+        #     list_videos(VIDEOS)
+        #     continue
 
         # ==============================================================
         # Doing stuff to / with videos
         # ==============================================================
 
-        if re.match(r'^(d(l|own(load)?)|(o(pen)?)|(w(atched)?))(\s[0-9]+)+$', choice):
+        if re.match(r'^(d(l|own(load)?)|(o(pen)?)|(w(atched)?))(\s[0-9]+)+\s*$', choice):
             action, *choice = choice.split()
 
         elif re.match(r'^a(udio)?(\s[0-9]+)+$', choice):
@@ -505,7 +657,6 @@ g RE    grep RE      filter videos with regex RE
 
             elif action.startswith('w'):
                 Actions(VIDEOS[c]).mark_as_watched()
-                continue
 
             else:
                 raise Exception

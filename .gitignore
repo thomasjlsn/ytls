@@ -1,2 +1,3 @@
 API_KEY
-subscriptions.txt
+subscriptions.conf
+*.bak
