@@ -365,38 +365,55 @@ class Actions:
 
 class Sorted:
     '''
-    Sort operations for Video objects
+    Chainable sort operations for Video objects
+
+    the `.get()` method breaks the chain and executes the sort.
     '''
-    def __init__(self, videos):
-        self.value = videos
+    def __init__(self, videos=list(), keychain=list()):
+        self.videos = videos
+        self.keychain = keychain
 
     def get(self):
-        return self.value
+        def int_or_ord(char):
+            if type(char) == str:
+                char = ord(char)
+            return str(char)
+
+        return sorted(
+            self.videos,
+            key=lambda v: int(''.join((
+                int_or_ord(c) for c in ''.join((
+                    key_function(v) for key_function in self.keychain))))))
 
     @property
     def by_date(self):
-        return Sorted(sorted(
-            self.value,
-            key=lambda v: int(re.sub(r'[^0-9]', '', ''.join((v.pubdate, v.pubtime))))
-        ))
+        self.keychain.append(
+            lambda v: re.sub(r'[^0-9]', '', v.pubdate)
+        )
+        return Sorted(
+            videos=self.videos,
+            keychain=self.keychain,
+        )
 
     @property
     def by_user(self):
-        return Sorted(sorted(
-            self.value,
-            key=lambda v: v.channel
-        ))
+        self.keychain.append(
+            lambda v: v.channel
+        )
+        return Sorted(
+            videos=self.videos,
+            keychain=self.keychain
+        )
 
     @property
     def by_views(self):
-        return Sorted(sorted(
-            self.value,
-            key=lambda v: v.views
-        ))
-
-    @property
-    def reversed(self):
-        return Sorted(list(reversed(self.value)))
+        self.keychain.append(
+            lambda v: str(v.views)
+        )
+        return Sorted(
+            videos=self.videos,
+            keychain=self.keychain
+        )
 
 
 class ViewHistory(Cachable):
@@ -593,34 +610,32 @@ g RE    grep RE      filter videos with regex RE
             continue
 
         if choice in ('c', 'channel'):
-            VIDEOS = (Sorted(VIDEOS)
-                      .by_user
-                      .get())
-
+            VIDEOS = list(Sorted(videos=VIDEOS, keychain=list())
+                          .by_user
+                          .get())
             list_videos(VIDEOS)
             continue
 
         if choice in ('d', 'date'):
-            VIDEOS = (Sorted(VIDEOS)
-                      .by_date
-                      .get())
+            VIDEOS = list(Sorted(videos=VIDEOS, keychain=list())
+                          .by_date
+                          .get())
             list_videos(VIDEOS)
             continue
 
         if choice in ('v', 'views'):
-            VIDEOS = (Sorted(VIDEOS)
-                      .by_views
-                      .get())
-
+            VIDEOS = list(Sorted(videos=VIDEOS, keychain=list())
+                          .by_views
+                          .get())
             list_videos(VIDEOS)
             continue
 
-        # Example of chaining sorts TODO
+        # Example of chaining sorts
         # if choice == 'my new sort':
         #     VIDEOS = (Sorted(VIDEOS)
         #               .by_user
         #               .by_date
-        #               .reversed
+        #               .by_views
         #               .get())
         #     list_videos(VIDEOS)
         #     continue
