@@ -26,10 +26,6 @@ class Settings():
     SHOW_URL = False
 
 
-def clear_line():
-    stdout.write('\r\033[2K')
-
-
 color_codes = {
     'debug':        ('31;1', '31;1'),
     'timestamp':    ('2',    '2'),
@@ -123,8 +119,7 @@ class ChannelID(YouTubeAPI):
         ids = self.load_cache(self.cache_name, default=dict())
         channel_id = ids.get(username, None)
 
-        clear_line()
-        stdout.write(f'\rfetching channel id for "{username}"...')
+        stdout.write(f'fetching channel id for "{username}"...\n')
 
         if channel_id is None:
             query = self.lazy().channels().list(
@@ -158,8 +153,7 @@ class ChannelUploads(YouTubeAPI):
     def get(self, force=False):
         uploads = self.load_cache(self.cache_name, default=list())
 
-        clear_line()
-        stdout.write(f'\rfetching videos from "{self.username}"...')
+        stdout.write(f'fetching videos from "{self.username}"...\n')
 
         if not uploads or force:
             query = self.lazy().playlistItems().list(
@@ -219,8 +213,7 @@ class Video:
         self.pubtime = video['publishedAt'][11:16]
         self.viewed = self.id in VIEWS.get()
 
-        clear_line()
-        stdout.write(f'\rfetching details of video "{self.title}"...')
+        stdout.write(f'fetching details of video "{self.title}"...\n')
         self._details = VideoDetails(video_id=self.id).get(force=False)
 
         self.description = self._details[0]['snippet'].get('description', None)
@@ -352,7 +345,6 @@ class Actions:
         except AttributeError:
             title = title
 
-        clear_line()
         writer('index', f'{str(index).ljust(index_column_width)} ')
         writer('timestamp', ' '.join([self.video.pubdate, self.video.pubtime]))
         writer('channel',   f' {self.video.channel}:')
@@ -373,6 +365,9 @@ class Sorted:
         self.videos = videos
         self.keychain = keychain
 
+    def __repr__(self):
+        return f'Sorted(videos={self.videos}, keychain={self.keychain})'
+
     def get(self):
         def int_or_ord(char):
             if type(char) == str:
@@ -385,10 +380,27 @@ class Sorted:
                 int_or_ord(c) for c in ''.join((
                     key_function(v) for key_function in self.keychain))))))
 
+    def where(self, condition: callable):
+        self.videos = list(filter(condition, self.videos))
+        return Sorted(
+            videos=self.videos,
+            keychain=self.keychain,
+        )
+
     @property
     def by_date(self):
         self.keychain.append(
             lambda v: re.sub(r'[^0-9]', '', v.pubdate)
+        )
+        return Sorted(
+            videos=self.videos,
+            keychain=self.keychain,
+        )
+
+    @property
+    def by_time(self):
+        self.keychain.append(
+            lambda v: re.sub(r'[^0-9]', '', v.pubtime)
         )
         return Sorted(
             videos=self.videos,
@@ -408,7 +420,7 @@ class Sorted:
     @property
     def by_likes(self):
         self.keychain.append(
-            lambda v: str(v.likes)
+            lambda v: str(v.likes).zfill(12)
         )
         return Sorted(
             videos=self.videos,
@@ -418,7 +430,7 @@ class Sorted:
     @property
     def by_views(self):
         self.keychain.append(
-            lambda v: str(v.views)
+            lambda v: str(v.views).zfill(12)
         )
         return Sorted(
             videos=self.videos,
@@ -524,8 +536,7 @@ if __name__ == '__main__':
 
     while True:
         try:
-            clear_line()
-            choice = input(f'\033[1mYTLS $\033[0m ')
+            choice = input(f'\033[1mYTLS $\033[0m ').strip()
         except (EOFError, KeyboardInterrupt):
             break
 
@@ -629,6 +640,7 @@ g RE    grep RE      filter videos with regex RE
         if choice in ('d', 'date'):
             VIDEOS = list(Sorted(videos=VIDEOS, keychain=list())
                           .by_date
+                          .by_time
                           .get())
             list_videos(VIDEOS)
             continue
