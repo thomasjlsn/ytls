@@ -294,6 +294,9 @@ class Actions:
         else:
             stderr.write(f'not yet implemented for os type: {os.name}\n')
 
+    def open_in_mpv(self):
+        os.system('youtube-mpv {}' % shellescape(self.video.url))
+
     def mark_as_watched(self):
         VIEWS.add(self.video.id)
         self.message('marked as watched')
@@ -530,7 +533,7 @@ if __name__ == '__main__':
     SETTINGS = Settings()
     SUBSCRIPTIONS = ChannelID()
     VIEWS = ViewHistory()
-    VIDEOS = list(get_videos(parse_config_file()))
+    # VIDEOS = list(get_videos(parse_config_file()))
 
     # Actions(VIDEOS[0]).get_video_details()
 
@@ -690,6 +693,9 @@ g RE    grep RE      filter videos with regex RE
 
             elif action.startswith('d'):
                 Actions(VIDEOS[c]).download()
+
+            elif action.startswith('m'):
+                Actions(VIDEOS[c]).open_in_mpv()
 
             elif action.startswith('o'):
                 Actions(VIDEOS[c]).open_in_browser()
